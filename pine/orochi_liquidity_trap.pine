@@ -100,9 +100,11 @@ minStopAtrMult = input.float(1.00, "Min stop distance (x ATR)", minval=0.0, step
 minFvgUsd      = input.float(0.50, "Fixed: min FVG size ($)", minval=0.0, step=0.1, group=G_SIZE)
 stopBufUsd     = input.float(1.00, "Fixed: stop buffer ($)", minval=0.0, step=0.1, group=G_SIZE)
 minStopUsd     = input.float(2.00, "Fixed: min stop distance ($)", minval=0.0, step=0.5, group=G_SIZE)
+fvgDrawAtrMult = input.float(0.05, "Draw FVGs down to (x ATR). Only gaps above the minimum FVG size can trigger a trade", minval=0.0, step=0.01, group=G_SIZE)
+fvgDrawUsd     = input.float(0.10, "Fixed: draw FVGs down to ($)", minval=0.0, step=0.05, group=G_SIZE)
 
 // --- FVG ---
-maxFvgKeep   = input.int(40, "Max FVG/IFVG tracked", minval=5, maxval=150, group=G_FVG)
+maxFvgKeep   = input.int(80, "Max FVG/IFVG tracked", minval=5, maxval=150, group=G_FVG)
 fvgMaxAgeMin = input.float(1440.0, "FVG/IFVG max age (minutes)", minval=10.0, group=G_FVG)
 fvgWaitMin   = input.float(15.0, "Wait for the FVG after the MSS candle (minutes)", minval=0.0, group=G_FVG)
 
@@ -210,22 +212,28 @@ showReport = input.bool(false, "Show module report tables (win rate by module + 
 
 // --- display ---
 showSess    = input.bool(true, "Shade sessions", group=G_VIS)
-sessStyle   = input.string(SS_BOTH, "Session shading style", options=[SS_BOTH, SS_RIBBON, SS_SHADE], group=G_VIS)
+sessStyle   = input.string(SS_RIBBON, "Session shading style", options=[SS_BOTH, SS_RIBBON, SS_SHADE], group=G_VIS)
 shadeTr     = input.int(94, "Light shade transparency (0-100)", minval=0, maxval=100, group=G_VIS)
 ribbonTr    = input.int(30, "Thin ribbon transparency (0-100)", minval=0, maxval=100, group=G_VIS)
 showTable   = input.bool(true, "Show status table", group=G_VIS)
-showAsia    = input.bool(true, "Draw Asian range box", group=G_VIS)
-asiaFillTr  = input.int(92, "Asian box fill transparency", minval=0, maxval=100, group=G_VIS)
-asiaLineTr  = input.int(55, "Asian box border transparency", minval=0, maxval=100, group=G_VIS)
+showSessBox = input.bool(true, "Draw session range boxes (high-low of each session, labelled)", group=G_VIS)
+showAsia    = input.bool(true, "Asia", group=G_VIS, inline="sb")
+showLon     = input.bool(true, "London", group=G_VIS, inline="sb")
+showNyAm    = input.bool(true, "NY AM", group=G_VIS, inline="sb")
+showNyPm    = input.bool(true, "NY PM", group=G_VIS, inline="sb")
+sessBoxTr   = input.int(88, "Session box fill transparency", minval=0, maxval=100, group=G_VIS)
+sessKeepN   = input.int(3, "Keep the last N sessions of each type", minval=1, maxval=20, group=G_VIS)
+sessLines   = input.bool(true, "Extend each session high / low as a thin dashed line", group=G_VIS)
+purgeDaily  = input.bool(false, "Wipe all zone boxes at the start of every trading day", group=G_VIS)
 showSetup   = input.bool(true, "Draw setup label + entry / stop / target lines", group=G_VIS)
 showFvg     = input.bool(true, "Draw FVGs", group=G_VIS, inline="fvg")
-fvgKeepN    = input.int(2, "keep last", minval=1, maxval=50, group=G_VIS, inline="fvg")
+fvgKeepN    = input.int(12, "keep last", minval=1, maxval=50, group=G_VIS, inline="fvg")
 showIfvg    = input.bool(true, "Draw IFVGs", group=G_VIS, inline="ifvg")
-ifvgKeepN   = input.int(2, "keep last", minval=1, maxval=50, group=G_VIS, inline="ifvg")
+ifvgKeepN   = input.int(6, "keep last", minval=1, maxval=50, group=G_VIS, inline="ifvg")
 showOb      = input.bool(true, "Draw order blocks", group=G_VIS, inline="ob")
-obKeepN     = input.int(2, "keep last", minval=1, maxval=50, group=G_VIS, inline="ob")
+obKeepN     = input.int(8, "keep last", minval=1, maxval=50, group=G_VIS, inline="ob")
 showBrk     = input.bool(true, "Draw breakers", group=G_VIS, inline="brk")
-brkKeepN    = input.int(2, "keep last", minval=1, maxval=50, group=G_VIS, inline="brk")
+brkKeepN    = input.int(4, "keep last", minval=1, maxval=50, group=G_VIS, inline="brk")
 showOte     = input.bool(true, "Draw OTE zone", group=G_VIS, inline="ote")
 oteKeepN    = input.int(2, "keep last", minval=1, maxval=50, group=G_VIS, inline="ote")
 showMss     = input.bool(true, "Mark MSS", group=G_VIS)
@@ -260,6 +268,16 @@ type Zone
     int   tL
     bool  mit
     bool  retested
+    bool  tradeable
+
+// One drawn session (box + high / low lines).
+type SessDraw
+    box   bx
+    line  hiLn
+    line  loLn
+    float hi
+    float lo
+    int   t0
 
 // Equal highs / lows liquidity pool.
 type Pool
@@ -312,7 +330,6 @@ var bool  newsBlk   = false
 var float arh        = na
 var float arl        = na
 var bool  rangeReady = false
-var box   asiaBox    = na
 var bool  arhMit     = false
 var bool  arlMit     = false
 var float dayHiSeen  = na
@@ -363,6 +380,14 @@ var array<Zone>  ifvgQ    = array.new<Zone>()
 var array<Zone>  obQ      = array.new<Zone>()
 var array<Zone>  brkQ     = array.new<Zone>()
 var array<box>   oteQ     = array.new<box>()
+var array<SessDraw> sAsiaQ  = array.new<SessDraw>()
+var array<SessDraw> sLonQ   = array.new<SessDraw>()
+var array<SessDraw> sNyAmQ  = array.new<SessDraw>()
+var array<SessDraw> sNyPmQ  = array.new<SessDraw>()
+var bool pAsia = false
+var bool pLon  = false
+var bool pNyAm = false
+var bool pNyPm = false
 var array<float> liqHi    = array.new<float>()
 var array<int>   liqHiBar = array.new<int>()
 var array<float> liqLo    = array.new<float>()
@@ -807,7 +832,7 @@ f_pickTarget(int d, float entry, float minDist) =>
 // ---- zone constructor ----
 f_mkZone(float top, float bot, int midBar, int dir, int tL, int uid) =>
     box nb = na
-    Zone.new(top, bot, midBar, dir, false, true, nb, uid, tL, false, false)
+    Zone.new(top, bot, midBar, dir, false, true, nb, uid, tL, false, false, true)
 
 // ---- drawing (all with xloc.bar_time) ----
 // Zone box, extended to the right until ended.
@@ -867,7 +892,7 @@ f_endZone(Zone z, array<Zone> q, string txt) =>
 // An FVG whose polarity flipped stops being an FVG box; it is redrawn as an IFVG only if it is from today.
 f_flipZone(Zone z) =>
     f_dropZone(z, fvgQ)
-    if showIfvg and z.midBar >= dayStartLb
+    if showIfvg and (not purgeDaily or z.midBar >= dayStartLb)
         f_drawZone(z, ifvgQ, ifvgKeepN, z.dir == 1 ? colIfvgBull : colIfvgBear, z.dir == 1 ? "IFVG▲" : "IFVG▼")
     true
 
@@ -904,6 +929,42 @@ f_hline(float price, color col) =>
 f_plabel(float price, string nm, color col) =>
     label.new(lt + 2 * effMs, price, nm + str.tostring(price, format.mintick), xloc=xloc.bar_time, style=label.style_label_left,
          color=color.new(col, 10), textcolor=color.white, size=size.small)
+
+// Session range box (high-low so far) with thin dashed high / low lines that keep extending until the next session of the same type.
+f_sessUpdate(array<SessDraw> q, bool inNow, bool inPrev, string nm, color c) =>
+    int n = array.size(q)
+    if inNow and not inPrev
+        SessDraw d = SessDraw.new(hi=high, lo=low, t0=time)
+        d.bx := box.new(time, high, time + chartMs, low, xloc=xloc.bar_time, border_color=color.new(c, 30), border_width=1,
+             bgcolor=color.new(c, sessBoxTr), text=nm, text_color=c, text_size=size.small,
+             text_halign=text.align_center, text_valign=text.align_top)
+        if sessLines
+            d.hiLn := line.new(time, high, time + chartMs, high, xloc=xloc.bar_time, color=color.new(c, 35), style=line.style_dashed, width=1)
+            d.loLn := line.new(time, low, time + chartMs, low, xloc=xloc.bar_time, color=color.new(c, 35), style=line.style_dashed, width=1)
+        array.push(q, d)
+        while array.size(q) > sessKeepN
+            SessDraw old = array.shift(q)
+            box.delete(old.bx)
+            if not na(old.hiLn)
+                line.delete(old.hiLn)
+            if not na(old.loLn)
+                line.delete(old.loLn)
+    else if n > 0
+        SessDraw cur = array.get(q, n - 1)
+        if inNow
+            cur.hi := math.max(cur.hi, high)
+            cur.lo := math.min(cur.lo, low)
+            box.set_top(cur.bx, cur.hi)
+            box.set_bottom(cur.bx, cur.lo)
+            box.set_right(cur.bx, time + chartMs)
+        if not na(cur.hiLn)
+            line.set_y1(cur.hiLn, cur.hi)
+            line.set_y2(cur.hiLn, cur.hi)
+            line.set_x2(cur.hiLn, time + chartMs)
+            line.set_y1(cur.loLn, cur.lo)
+            line.set_y2(cur.loLn, cur.lo)
+            line.set_x2(cur.loLn, time + chartMs)
+    true
 
 // Keep a key-level line + label in sync with its value (chart context, chart-bar times).
 f_lvlUpdate(Lvl L, float px, string txt, color c) =>
@@ -1140,6 +1201,7 @@ float relVol     = na
 float minFvgNow  = na
 float stopBufNow = na
 float minStopNow = na
+float drawFvgNow = na
 bool  lLon       = false
 bool  lNyKz      = false
 bool  sbNow      = false
@@ -1186,6 +1248,7 @@ if newLogic
     minFvgNow  := useAtrSizes and not na(atrV) ? fvgAtrMult * atrV : minFvgUsd
     stopBufNow := useAtrSizes and not na(atrV) ? bufAtrMult * atrV : stopBufUsd
     minStopNow := useAtrSizes and not na(atrV) ? minStopAtrMult * atrV : minStopUsd
+    drawFvgNow := useAtrSizes and not na(atrV) ? fvgDrawAtrMult * atrV : fvgDrawUsd
 
     // ------------------------------------------------------------- 1. sessions (time of day in each session's own TZ)
     bool lAsia = f_inS(lt, asia0, asia1, asiaTz)
@@ -1204,18 +1267,16 @@ if newLogic
 
     // ------------------------------------------------------------- 2. asian range, new-day reset
     if newDay
-        if not na(asiaBox)
-            box.set_extend(asiaBox, extend.none)
-            box.set_right(asiaBox, lt)
-        // new trading day: wipe every old FVG / IFVG / OB / breaker / OTE box (and their ended / mitigated labels)
         dayStartLb := lb
         daysSeen += 1
-        f_purgeQ(fvgQ)
-        f_purgeQ(ifvgQ)
-        f_purgeQ(obQ)
-        f_purgeQ(brkQ)
-        f_purgeBoxQ(oteQ)
-        oteBox := na
+        // optional: wipe every old FVG / IFVG / OB / breaker / OTE box (and their ended / mitigated labels)
+        if purgeDaily
+            f_purgeQ(fvgQ)
+            f_purgeQ(ifvgQ)
+            f_purgeQ(obQ)
+            f_purgeQ(brkQ)
+            f_purgeBoxQ(oteQ)
+            oteBox := na
         arh := cH
         arl := cL
         rangeReady := false
@@ -1238,19 +1299,9 @@ if newLogic
             wkHiSeen := cH
             wkLoSeen := cL
         lastNdDow := ndDow
-        if showAsia
-            asiaBox := box.new(lt, cH, lt + effMs, cL, xloc=xloc.bar_time, border_color=color.new(colAsia, asiaLineTr),
-                 border_width=1, border_style=line.style_dashed, bgcolor=color.new(colAsia, asiaFillTr), text="Asian range",
-                 text_color=color.new(colAsia, 30), text_size=size.small, text_halign=text.align_left, text_valign=text.align_top)
-        else
-            asiaBox := na
     else if lAsia
         arh := math.max(arh, cH)
         arl := math.min(arl, cL)
-        if not na(asiaBox)
-            box.set_top(asiaBox, arh)
-            box.set_bottom(asiaBox, arl)
-            box.set_right(asiaBox, lt + effMs)
     dayHiSeen := na(dayHiSeen) ? cH : math.max(dayHiSeen, cH)
     dayLoSeen := na(dayLoSeen) ? cL : math.min(dayLoSeen, cL)
     wkHiSeen  := na(wkHiSeen) ? cH : math.max(wkHiSeen, cH)
@@ -1258,8 +1309,6 @@ if newLogic
 
     if asiaEnd
         rangeReady := daysSeen > 1
-        if not na(asiaBox)
-            box.set_extend(asiaBox, extend.right)
 
     // An Asian extreme counts as mitigated liquidity once a candle CLOSES beyond it.
     if rangeReady
@@ -1327,7 +1376,7 @@ if newLogic
         bearBrk := false
     mssBull := bullBrk and trend == -1      // break UP after a down move
     mssBear := bearBrk and trend == 1       // break DOWN after an up move
-    int brkSwingBar = mssBull ? lastSHbar : mssBear ? lastSLbar : na
+    int brkSwingBar = bullBrk ? lastSHbar : bearBrk ? lastSLbar : na
     if bullBrk
         shBroken := true
         trend := 1
@@ -1378,9 +1427,9 @@ if newLogic
                     else if not na(zb.bx)
                         box.set_text(zb.bx, zb.dir == 1 ? "BRK▲ retest" : "BRK▼ retest")
 
-    // --- On every MSS: displacement leg origin + order block + proxies ---
-    if mssBull or mssBear
-        bool bu = mssBull
+    // --- On every structure break (BOS or MSS): displacement leg origin + order block; only an MSS also arms the model ---
+    if bullBrk or bearBrk
+        bool bu = bullBrk
         int span = math.min(lb - brkSwingBar, legCapBars)
         int oOff = f_extOff(bu, span)
         float oPx = bu ? f_lo(oOff) : f_hi(oOff)
@@ -1393,27 +1442,28 @@ if newLogic
             newOb := f_mkZone(obT, obB, lb - obOff, bu ? 1 : -1, f_tm(obOff), zoneSeq)
             array.push(obs, newOb)
             if showOb
-                f_drawZone(newOb, obQ, obKeepN, bu ? colObBull : colObBear, bu ? "OB▲" : "OB▼")
+                f_drawZone(newOb, obQ, obKeepN, bu ? colObBull : colObBear, bu ? "Bull OB" : "Bear OB")
             if array.size(obs) > maxObKeep
                 Zone oldOb = array.shift(obs)
                 f_dropZone(oldOb, obQ)
-        mssDirV := bu ? 1 : -1
-        mssBarV := lb
-        mssOriginBar := lb - oOff
-        mssOriginPx := oPx
-        mssOb := newOb
-        // PROXIES (tick volume, not real order flow)
-        float bodyNow = math.abs(cC - cO)
-        mssBodyAtr := na(atrV) or atrV <= 0.0 ? na : bodyNow / atrV
-        mssRV := relVol
-        mssDispOk := not na(mssBodyAtr) and mssBodyAtr >= dispAtrMult and not na(relVol) and relVol >= dispVolMult
-        mssDelta := f_delta(oOff)
-        mssDeltaOk := bu ? mssDelta > 0.0 : mssDelta < 0.0
-        if showMss
-            if bu
-                label.new(lt, cL, "MSS", xloc=xloc.bar_time, style=label.style_label_up, color=color.new(color.green, 15), textcolor=color.white, size=size.tiny)
-            else
-                label.new(lt, cH, "MSS", xloc=xloc.bar_time, style=label.style_label_down, color=color.new(color.red, 15), textcolor=color.white, size=size.tiny)
+        if mssBull or mssBear
+            mssDirV := bu ? 1 : -1
+            mssBarV := lb
+            mssOriginBar := lb - oOff
+            mssOriginPx := oPx
+            mssOb := newOb
+            // PROXIES (tick volume, not real order flow)
+            float bodyNow = math.abs(cC - cO)
+            mssBodyAtr := na(atrV) or atrV <= 0.0 ? na : bodyNow / atrV
+            mssRV := relVol
+            mssDispOk := not na(mssBodyAtr) and mssBodyAtr >= dispAtrMult and not na(relVol) and relVol >= dispVolMult
+            mssDelta := f_delta(oOff)
+            mssDeltaOk := bu ? mssDelta > 0.0 : mssDelta < 0.0
+            if showMss
+                if bu
+                    label.new(lt, cL, "MSS", xloc=xloc.bar_time, style=label.style_label_up, color=color.new(color.green, 15), textcolor=color.white, size=size.tiny)
+                else
+                    label.new(lt, cH, "MSS", xloc=xloc.bar_time, style=label.style_label_down, color=color.new(color.red, 15), textcolor=color.white, size=size.tiny)
 
     // --- FVG / IFVG maintenance (existing zones first, then the new one) ---
     if array.size(fvgs) > 0
@@ -1443,14 +1493,16 @@ if newLogic
 
     float c1H = f_hi(2)
     float c1L = f_lo(2)
-    bool bullFvg = not na(c1H) and c1H < cL and (cL - c1H) >= minFvgNow
-    bool bearFvg = not na(c1L) and c1L > cH and (c1L - cH) >= minFvgNow
+    float fvgDetectMin = math.min(minFvgNow, drawFvgNow)
+    bool bullFvg = not na(c1H) and c1H < cL and (cL - c1H) >= fvgDetectMin
+    bool bearFvg = not na(c1L) and c1L > cH and (c1L - cH) >= fvgDetectMin
     if bullFvg or bearFvg
         bool newBull = bullFvg
         float newTop = newBull ? cL : c1L
         float newBot = newBull ? c1H : cH
         zoneSeq += 1
         Zone newFvgZ = f_mkZone(newTop, newBot, lb - 1, newBull ? 1 : -1, f_tm(2), zoneSeq)
+        newFvgZ.tradeable := (newTop - newBot) >= minFvgNow
         array.push(fvgs, newFvgZ)
         if showFvg
             f_drawZone(newFvgZ, fvgQ, fvgKeepN, newBull ? colFvgBull : colFvgBear, newBull ? "FVG▲" : "FVG▼")
@@ -1593,7 +1645,7 @@ if newLogic
             if array.size(fvgs) > 0
                 for i = array.size(fvgs) - 1 to 0
                     Zone zc = array.get(fvgs, i)
-                    if na(fz) and zc.alive and not zc.isIfvg and zc.dir == armDir and zc.midBar >= armOriginBar
+                    if na(fz) and zc.alive and zc.tradeable and not zc.isIfvg and zc.dir == armDir and zc.midBar >= armOriginBar
                         fz := zc
             if not na(fz)
                 int d = armDir
@@ -1602,7 +1654,7 @@ if newLogic
                 float fTop = fz.top
                 float fBot = fz.bot
                 // the trigger FVG must be visible even if the "last N" queue trimmed it
-                if showFvg and fz.midBar >= dayStartLb and na(fz.bx)
+                if showFvg and (not purgeDaily or fz.midBar >= dayStartLb) and na(fz.bx)
                     f_drawZone(fz, fvgQ, fvgKeepN, d == 1 ? colFvgBull : colFvgBear, d == 1 ? "FVG▲" : "FVG▼")
                     if fz.mit
                         f_greyZone(fz, "FVG mit")
@@ -1874,6 +1926,20 @@ f_gapUpdate(nwogG, useLevels and lvlNw ? nwogLo : na, useLevels and lvlNw ? nwog
 // =============================================================================
 // VISUALS
 // =============================================================================
+if showSessBox
+    if showAsia
+        f_sessUpdate(sAsiaQ, cAsia, pAsia, "Asia", colAsia)
+    if showLon
+        f_sessUpdate(sLonQ, cLon, pLon, "London", colLon)
+    if showNyAm
+        f_sessUpdate(sNyAmQ, cNyAm, pNyAm, "New York AM", colNyAm)
+    if showNyPm
+        f_sessUpdate(sNyPmQ, cNyPm, pNyPm, "New York PM", colNyPm)
+pAsia := cAsia
+pLon  := cLon
+pNyAm := cNyAm
+pNyPm := cNyPm
+
 bool shadeOn  = showSess and sessStyle != SS_RIBBON
 bool ribbonOn = showSess and sessStyle != SS_SHADE
 bgcolor(shadeOn and cAsia ? color.new(colAsia, shadeTr) : na, title="Asia session")
