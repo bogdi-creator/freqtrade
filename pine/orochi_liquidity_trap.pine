@@ -330,6 +330,7 @@ f_endZone(box b, string txt) =>
             box.set_text_color(b, color.new(color.gray, 35))
         else
             box.delete(b)
+    true
 
 // Re-style an FVG as an IFVG after its polarity flipped.
 f_flipBox(Zone z) =>
@@ -346,6 +347,7 @@ f_flipBox(Zone z) =>
     else if not na(z.bx)
         box.delete(z.bx)
         z.bx := na
+    true
 
 // =============================================================================
 // 1. SESSIONS, NEWS
