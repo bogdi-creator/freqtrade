@@ -145,7 +145,8 @@ useNews    = input.bool(true, "Enable news filter", group=G_NEWS)
 newsTz     = input.string("America/New_York", "Time zone of the list below", group=G_NEWS)
 newsBefore = input.int(30, "Minutes before", minval=0, group=G_NEWS, inline="nw")
 newsAfter  = input.int(30, "Minutes after", minval=0, group=G_NEWS, inline="nw")
-newsList   = input.string("2023-02-01 14:00;2023-03-22 14:00;2023-05-03 14:00;2023-06-14 14:00;2023-07-26 14:00;2023-09-20 14:00;2023-11-01 14:00;2023-12-13 14:00;2024-01-31 14:00;2024-03-20 14:00;2024-05-01 14:00;2024-06-12 14:00;2024-07-31 14:00;2024-09-18 14:00;2024-11-07 14:00;2024-12-18 14:00;2025-01-29 14:00;2025-03-19 14:00;2025-05-07 14:00;2025-06-18 14:00;2025-07-30 14:00;2025-09-17 14:00;2025-10-29 14:00;2025-12-10 14:00;2026-01-28 14:00;2026-03-18 14:00;2026-04-29 14:00;2026-06-17 14:00;2026-07-29 14:00;2026-09-16 14:00;2026-10-28 14:00;2026-12-09 14:00", "Red-folder times: YYYY-MM-DD HH:MM separated by ;  (default = FOMC statements)", group=G_NEWS)
+newsList   = input.string("2023-02-01 14:00;2023-03-22 14:00;2023-05-03 14:00;2023-06-14 14:00;2023-07-26 14:00;2023-09-20 14:00;2023-11-01 14:00;2023-12-13 14:00;2024-01-31 14:00;2024-03-20 14:00;2024-05-01 14:00;2024-06-12 14:00;2024-07-31 14:00;2024-09-18 14:00;2024-11-07 14:00;2024-12-18 14:00;2025-01-29 14:00;2025-03-19 14:00;2025-05-07 14:00;2025-06-18 14:00;2025-07-30 14:00;2025-09-17 14:00;2025-10-29 14:00;2025-12-10 14:00;2026-01-28 14:00;2026-03-18 14:00;2026-04-29 14:00;2026-06-17 14:00;2026-07-29 14:00;2026-09-16 14:00;2026-10-28 14:00;2026-12-09 14:00", "FOMC statements: YYYY-MM-DD HH:MM separated by ;", group=G_NEWS)
+newsList2  = input.string("2026-09-04 08:30;2026-09-11 08:30;2026-09-16 08:30;2026-09-30 08:30;2026-10-02 08:30;2026-10-07 14:00;2026-10-14 08:30;2026-10-15 08:30;2026-10-29 08:30;2026-11-06 08:30;2026-11-10 08:30;2026-11-13 08:30;2026-11-18 14:00;2026-11-25 08:30;2026-12-04 08:30;2026-12-10 08:30;2026-12-16 10:00;2026-12-30 14:00", "Other red-folder USD releases (NFP, CPI, PPI, retail sales, PCE/GDP, FOMC minutes): same format", group=G_NEWS, tooltip="Dates from BLS / BEA / Census / Fed calendars; several (2026-09-04 NFP, 2026-10-07 and 2026-11-18 and 2026-12-30 FOMC minutes) are rule-of-thumb estimates - verify. Add Financial Juice red-folder events here, one YYYY-MM-DD HH:MM per entry, separated by ;")
 
 // --- M1 HTF bias ---
 useBias    = input.bool(true, "Enable HTF bias (table + confluence score)", group=G_M1)
@@ -1061,7 +1062,7 @@ bool cNyPm = f_inS(time, nypm0, nypm1, nypmTz)
 
 // Parse the news list once ("YYYY-MM-DD HH:MM", spaces ignored, separated by ;).
 if barstate.isfirst
-    array<string> parts = str.split(newsList, ";")
+    array<string> parts = str.split(newsList + ";" + newsList2, ";")
     for p in parts
         string q = str.replace_all(p, " ", "")
         if str.length(q) == 15
