@@ -222,14 +222,14 @@ showLon     = input.bool(true, "London", group=G_VIS, inline="sb")
 showNyAm    = input.bool(true, "NY AM", group=G_VIS, inline="sb")
 showNyPm    = input.bool(true, "NY PM", group=G_VIS, inline="sb")
 sessBoxTr   = input.int(88, "Session box fill transparency", minval=0, maxval=100, group=G_VIS)
-sessKeepN   = input.int(3, "Keep the last N sessions of each type", minval=1, maxval=20, group=G_VIS)
+sessKeepN   = input.int(5, "Keep the last N sessions of each type", minval=1, maxval=40, group=G_VIS)
 sessLines   = input.bool(true, "Extend each session high / low as a thin dashed line", group=G_VIS)
 purgeDaily  = input.bool(false, "Wipe all zone boxes at the start of every trading day", group=G_VIS)
 showSetup   = input.bool(true, "Draw setup label + entry / stop / target lines", group=G_VIS)
 showFvg     = input.bool(true, "Draw FVGs", group=G_VIS, inline="fvg")
 fvgKeepN    = input.int(12, "keep last", minval=1, maxval=50, group=G_VIS, inline="fvg")
 showIfvg    = input.bool(true, "Draw IFVGs", group=G_VIS, inline="ifvg")
-ifvgKeepN   = input.int(6, "keep last", minval=1, maxval=50, group=G_VIS, inline="ifvg")
+ifvgKeepN   = input.int(12, "keep last", minval=1, maxval=50, group=G_VIS, inline="ifvg")
 showOb      = input.bool(true, "Draw order blocks", group=G_VIS, inline="ob")
 obKeepN     = input.int(8, "keep last", minval=1, maxval=50, group=G_VIS, inline="ob")
 showBrk     = input.bool(true, "Draw breakers", group=G_VIS, inline="brk")
@@ -269,6 +269,7 @@ type Zone
     bool  mit
     bool  retested
     bool  tradeable
+    bool  fromMss
 
 // One drawn session (box + high / low lines).
 type SessDraw
@@ -832,7 +833,7 @@ f_pickTarget(int d, float entry, float minDist) =>
 // ---- zone constructor ----
 f_mkZone(float top, float bot, int midBar, int dir, int tL, int uid) =>
     box nb = na
-    Zone.new(top, bot, midBar, dir, false, true, nb, uid, tL, false, false, true)
+    Zone.new(top, bot, midBar, dir, false, true, nb, uid, tL, false, false, true, false)
 
 // ---- drawing (all with xloc.bar_time) ----
 // Zone box, extended to the right until ended.
@@ -892,7 +893,7 @@ f_endZone(Zone z, array<Zone> q, string txt) =>
 // An FVG whose polarity flipped stops being an FVG box; it is redrawn as an IFVG only if it is from today.
 f_flipZone(Zone z) =>
     f_dropZone(z, fvgQ)
-    if showIfvg and (not purgeDaily or z.midBar >= dayStartLb)
+    if showIfvg and z.tradeable and (not purgeDaily or z.midBar >= dayStartLb)
         f_drawZone(z, ifvgQ, ifvgKeepN, z.dir == 1 ? colIfvgBull : colIfvgBear, z.dir == 1 ? "IFVG▲" : "IFVG▼")
     true
 
@@ -1392,7 +1393,7 @@ if newLogic
             if mit
                 zo.alive := false
                 f_endZone(zo, obQ, "OB mitigated")
-                if useBrk
+                if useBrk and zo.fromMss
                     zoneSeq += 1
                     Zone bz = f_mkZone(zo.top, zo.bot, lb, -zo.dir, zo.tL, zoneSeq)
                     array.push(brks, bz)
@@ -1440,6 +1441,7 @@ if newLogic
             float obB = obFullWick ? f_lo(obOff) : math.min(f_op(obOff), f_cl(obOff))
             zoneSeq += 1
             newOb := f_mkZone(obT, obB, lb - obOff, bu ? 1 : -1, f_tm(obOff), zoneSeq)
+            newOb.fromMss := mssBull or mssBear
             array.push(obs, newOb)
             if showOb
                 f_drawZone(newOb, obQ, obKeepN, bu ? colObBull : colObBear, bu ? "Bull OB" : "Bear OB")
@@ -1506,6 +1508,8 @@ if newLogic
         array.push(fvgs, newFvgZ)
         if showFvg
             f_drawZone(newFvgZ, fvgQ, fvgKeepN, newBull ? colFvgBull : colFvgBear, newBull ? "FVG▲" : "FVG▼")
+            if not newFvgZ.tradeable and not na(newFvgZ.bx)
+                box.set_bgcolor(newFvgZ.bx, color.new(newBull ? colFvgBull : colFvgBear, 94))
         if array.size(fvgs) > maxFvgKeep
             Zone oldF = array.shift(fvgs)
             f_dropZone(oldF, oldF.isIfvg ? ifvgQ : fvgQ)
