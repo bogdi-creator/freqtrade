@@ -482,7 +482,8 @@ f_htfMss(int len) =>
         if hTrd == 1
             hMss := -1
         hTrd := -1
-    hMss
+    // the one-bar shift happens HERE (value of the last CLOSED bar), not at the call site
+    hMss[1]
 
 // =============================================================================
 // HIGHER-TIMEFRAME / EXTERNAL DATA (all non-repainting: [1] offsets, lookahead_on, or same-TF)
@@ -491,8 +492,8 @@ f_htfMss(int len) =>
 [fO, fH, fL, fC, fV, fT] = request.security(syminfo.tickerid, logicTf, [open[1], high[1], low[1], close[1], volume[1], time[1]], lookahead=barmerge.lookahead_on)
 
 // M1: last MSS direction on H4 and Daily, taken from the last CLOSED HTF bar
-int mssH4 = nz(request.security(syminfo.tickerid, "240", f_htfMss(htfSwing)[1], lookahead=barmerge.lookahead_on))
-int mssD1 = nz(request.security(syminfo.tickerid, "D", f_htfMss(htfSwing)[1], lookahead=barmerge.lookahead_on))
+int mssH4 = nz(request.security(syminfo.tickerid, "240", f_htfMss(htfSwing), lookahead=barmerge.lookahead_on))
+int mssD1 = nz(request.security(syminfo.tickerid, "D", f_htfMss(htfSwing), lookahead=barmerge.lookahead_on))
 
 // M2: previous day / week levels and the opening gaps (open of the CURRENT HTF bar is known at its start)
 [pdhV, pdlV, pdcV, dOpenV] = request.security(syminfo.tickerid, "D", [high[1], low[1], close[1], open], lookahead=barmerge.lookahead_on)
