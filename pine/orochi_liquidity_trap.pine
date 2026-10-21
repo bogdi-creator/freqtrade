@@ -18,6 +18,7 @@
 //   * Orders are placed / cancelled at chart-bar close only (barstate.isconfirmed).
 //   * All boxes / lines / labels use xloc.bar_time, so they survive timeframe changes.
 //
+//  Higher-timeframe FVG / IFVG boxes (15m, 1H, 4H, D by default) are display only and never feed the strategy.
 //  NOTES: session day masks (':23456') are ignored (time of day only). The manual pivot rule is left
 //  strict / right non-strict (TradingView's tie rule for ta.pivothigh is undocumented). Silver Bullet window 1
 //  (03:00-04:00 NY) cannot produce an entry because Head 2 must happen in a NY killzone.
@@ -57,6 +58,7 @@ G_M9   = "M9-M11. ORDER-FLOW PROXIES (tick volume, NOT real order flow)"
 G_M12  = "M12. SMT divergence (gold vs silver)"
 G_M13  = "M13. Confluence score"
 G_M14  = "M14. Reporting"
+G_HTF  = "11. Higher-timeframe FVGs (display only, never used by the strategy)"
 G_VIS  = "Display"
 
 M_FVG   = "FVG 50% (CE)"
@@ -210,6 +212,21 @@ minScore = input.int(0, "Minimum confluence score to take a trade (0-10)", minva
 // --- M14 reporting ---
 showReport = input.bool(false, "Show module report tables (win rate by module + last trades)", group=G_M14)
 
+// --- higher-timeframe FVG / IFVG (display only) ---
+showHtfFvg  = input.bool(true, "Draw higher-timeframe FVGs", group=G_HTF)
+showHtfIfvg = input.bool(true, "Draw higher-timeframe IFVGs (FVG closed through by an HTF candle)", group=G_HTF)
+htfOn1      = input.bool(true, "Timeframe 1", group=G_HTF, inline="h1")
+htfTf1      = input.timeframe("15", "", group=G_HTF, inline="h1")
+htfOn2      = input.bool(true, "Timeframe 2", group=G_HTF, inline="h2")
+htfTf2      = input.timeframe("60", "", group=G_HTF, inline="h2")
+htfOn3      = input.bool(true, "Timeframe 3", group=G_HTF, inline="h3")
+htfTf3      = input.timeframe("240", "", group=G_HTF, inline="h3")
+htfOn4      = input.bool(true, "Timeframe 4", group=G_HTF, inline="h4")
+htfTf4      = input.timeframe("D", "", group=G_HTF, inline="h4")
+htfKeepN    = input.int(4, "Keep the last N FVGs and N IFVGs per timeframe", minval=1, maxval=20, group=G_HTF)
+htfFvgAtr   = input.float(0.10, "Ignore HTF gaps smaller than (x that timeframe's ATR)", minval=0.0, step=0.05, group=G_HTF)
+htfAgeBars  = input.int(100, "Drop an HTF zone after this many HTF bars", minval=5, maxval=500, group=G_HTF, tooltip="A timeframe at or below the chart timeframe is skipped (the chart's own FVGs are already drawn).")
+
 // --- display ---
 showSess    = input.bool(true, "Shade sessions", group=G_VIS)
 sessStyle   = input.string(SS_RIBBON, "Session shading style", options=[SS_BOTH, SS_RIBBON, SS_SHADE], group=G_VIS)
@@ -279,6 +296,13 @@ type SessDraw
     float hi
     float lo
     int   t0
+
+// Tracked higher-timeframe FVG zones for one timeframe slot (display only).
+type HtfSet
+    array<Zone> zs
+    array<Zone> fq
+    array<Zone> iq
+    int lastT
 
 // Equal highs / lows liquidity pool.
 type Pool
@@ -389,6 +413,10 @@ var bool pAsia = false
 var bool pLon  = false
 var bool pNyAm = false
 var bool pNyPm = false
+var HtfSet hs1 = HtfSet.new(array.new<Zone>(), array.new<Zone>(), array.new<Zone>(), 0)
+var HtfSet hs2 = HtfSet.new(array.new<Zone>(), array.new<Zone>(), array.new<Zone>(), 0)
+var HtfSet hs3 = HtfSet.new(array.new<Zone>(), array.new<Zone>(), array.new<Zone>(), 0)
+var HtfSet hs4 = HtfSet.new(array.new<Zone>(), array.new<Zone>(), array.new<Zone>(), 0)
 var array<float> liqHi    = array.new<float>()
 var array<int>   liqHiBar = array.new<int>()
 var array<float> liqLo    = array.new<float>()
@@ -540,6 +568,16 @@ float nwogHi  = nwogGap > syminfo.mintick ? math.max(pwcV, wOpenV) : na
 
 // M12: silver on the SAME timeframe as the chart (no offset needed). Falls back to the chart symbol when SMT is off.
 [sgH, sgL] = request.security(useSMT ? smtSym : syminfo.tickerid, timeframe.period, [high, low], lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+
+// Higher-timeframe FVG source bars (display only): candle 3 = last CLOSED HTF bar ([1]), candle 1 = [3]. Everything is shifted, so nothing repaints.
+int htfSec1 = int(timeframe.in_seconds(htfTf1))
+int htfSec2 = int(timeframe.in_seconds(htfTf2))
+int htfSec3 = int(timeframe.in_seconds(htfTf3))
+int htfSec4 = int(timeframe.in_seconds(htfTf4))
+[q1h1, q1l1, q1c1, q1t1, q1h3, q1l3, q1t3, q1a] = request.security(syminfo.tickerid, htfTf1, [high[1], low[1], close[1], time[1], high[3], low[3], time[3], ta.atr(14)[1]], lookahead=barmerge.lookahead_on)
+[q2h1, q2l1, q2c1, q2t1, q2h3, q2l3, q2t3, q2a] = request.security(syminfo.tickerid, htfTf2, [high[1], low[1], close[1], time[1], high[3], low[3], time[3], ta.atr(14)[1]], lookahead=barmerge.lookahead_on)
+[q3h1, q3l1, q3c1, q3t1, q3h3, q3l3, q3t3, q3a] = request.security(syminfo.tickerid, htfTf3, [high[1], low[1], close[1], time[1], high[3], low[3], time[3], ta.atr(14)[1]], lookahead=barmerge.lookahead_on)
+[q4h1, q4l1, q4c1, q4t1, q4h3, q4l3, q4t3, q4a] = request.security(syminfo.tickerid, htfTf4, [high[1], low[1], close[1], time[1], high[3], low[3], time[3], ta.atr(14)[1]], lookahead=barmerge.lookahead_on)
 
 // =============================================================================
 // HELPERS
@@ -895,6 +933,78 @@ f_flipZone(Zone z) =>
     f_dropZone(z, fvgQ)
     if showIfvg and z.tradeable and (not purgeDaily or z.midBar >= dayStartLb)
         f_drawZone(z, ifvgQ, ifvgKeepN, z.dir == 1 ? colIfvgBull : colIfvgBear, z.dir == 1 ? "IFVG▲" : "IFVG▼")
+    true
+
+// ---- higher-timeframe FVG display (chart-bar times, display only) ----
+f_secName(int sec) =>
+    int dd = int(math.floor(sec / 86400.0))
+    int hh = int(math.floor(sec / 3600.0))
+    int mm = int(math.floor(sec / 60.0))
+    sec >= 86400 ? (dd == 1 ? "D" : str.tostring(dd) + "D") : sec >= 3600 ? str.tostring(hh) + "H" : str.tostring(mm) + "m"
+
+f_hBox(int tLeft, float top, float bot, color col, string txt, int fillTr, int bw) =>
+    box.new(tLeft, top, time + chartMs, bot, xloc=xloc.bar_time, border_color=color.new(col, 30), border_width=bw,
+         extend=extend.right, bgcolor=color.new(col, fillTr), text=txt, text_color=color.new(col, 0),
+         text_size=size.small, text_halign=text.align_right, text_valign=text.align_center)
+
+f_hDraw(Zone z, array<Zone> q, int keepN, color c, string txt, int fillTr, int bw) =>
+    if na(z.bx)
+        z.bx := f_hBox(z.tL, z.top, z.bot, c, txt, fillTr, bw)
+        array.push(q, z)
+        while array.size(q) > keepN
+            Zone old = array.shift(q)
+            if not na(old.bx)
+                box.delete(old.bx)
+                old.bx := na
+    true
+
+f_hEnd(Zone z, array<Zone> q) =>
+    if not na(z.bx)
+        if showDead
+            box.set_extend(z.bx, extend.none)
+            box.set_right(z.bx, time + chartMs)
+            box.set_bgcolor(z.bx, color.new(color.gray, 92))
+            box.set_border_color(z.bx, color.new(color.gray, 75))
+            box.set_text_color(z.bx, color.new(color.gray, 35))
+        else
+            f_dropZone(z, q)
+    true
+
+// Runs once per newly CLOSED bar of one higher timeframe: flip / end / age existing FVGs, then add the FVG the bar just completed.
+f_htfProcess(HtfSet S, string tfName, int tfMs, int fillTr, int bw, float hi1, float lo1, float cl1, int tm1, float hi3, float lo3, int tm3, float atrH) =>
+    if not na(tm1) and tm1 != S.lastT
+        S.lastT := tm1
+        int n = array.size(S.zs)
+        if n > 0
+            for i = n - 1 to 0
+                Zone zf = array.get(S.zs, i)
+                bool through = zf.dir == 1 ? cl1 < zf.bot : cl1 > zf.top
+                bool tooOld = tm1 - zf.tL > htfAgeBars * tfMs
+                if through and not zf.isIfvg
+                    zf.isIfvg := true
+                    zf.dir := -zf.dir
+                    f_dropZone(zf, S.fq)
+                    if showHtfIfvg
+                        f_hDraw(zf, S.iq, htfKeepN, zf.dir == 1 ? colIfvgBull : colIfvgBear, tfName + " IFVG" + (zf.dir == 1 ? "▲" : "▼"), fillTr, bw)
+                else if through and zf.isIfvg
+                    zf.alive := false
+                    f_hEnd(zf, S.iq)
+                    array.remove(S.zs, i)
+                else if tooOld
+                    zf.alive := false
+                    f_hEnd(zf, zf.isIfvg ? S.iq : S.fq)
+                    array.remove(S.zs, i)
+        float minGap = na(atrH) ? 0.0 : htfFvgAtr * atrH
+        bool hBull = not na(hi3) and not na(lo1) and hi3 < lo1 and (lo1 - hi3) >= minGap
+        bool hBear = not na(lo3) and not na(hi1) and lo3 > hi1 and (lo3 - hi1) >= minGap
+        if hBull or hBear
+            Zone nzH = f_mkZone(hBull ? lo1 : lo3, hBull ? hi3 : hi1, 0, hBull ? 1 : -1, tm3, tm3)
+            array.push(S.zs, nzH)
+            if showHtfFvg
+                f_hDraw(nzH, S.fq, htfKeepN, hBull ? colFvgBull : colFvgBear, tfName + " FVG" + (hBull ? "▲" : "▼"), fillTr, bw)
+            if array.size(S.zs) > 60
+                Zone oldH = array.shift(S.zs)
+                f_dropZone(oldH, oldH.isIfvg ? S.iq : S.fq)
     true
 
 // New trading day: remove every box of one type.
@@ -1930,6 +2040,16 @@ f_gapUpdate(nwogG, useLevels and lvlNw ? nwogLo : na, useLevels and lvlNw ? nwog
 // =============================================================================
 // VISUALS
 // =============================================================================
+// Higher-timeframe FVGs: only timeframes above the chart timeframe are processed (display only)
+if htfOn1 and htfSec1 > chartSec
+    f_htfProcess(hs1, f_secName(htfSec1), htfSec1 * 1000, 90, 1, q1h1, q1l1, q1c1, q1t1, q1h3, q1l3, q1t3, q1a)
+if htfOn2 and htfSec2 > chartSec
+    f_htfProcess(hs2, f_secName(htfSec2), htfSec2 * 1000, 86, 1, q2h1, q2l1, q2c1, q2t1, q2h3, q2l3, q2t3, q2a)
+if htfOn3 and htfSec3 > chartSec
+    f_htfProcess(hs3, f_secName(htfSec3), htfSec3 * 1000, 82, 2, q3h1, q3l1, q3c1, q3t1, q3h3, q3l3, q3t3, q3a)
+if htfOn4 and htfSec4 > chartSec
+    f_htfProcess(hs4, f_secName(htfSec4), htfSec4 * 1000, 78, 2, q4h1, q4l1, q4c1, q4t1, q4h3, q4l3, q4t3, q4a)
+
 if showSessBox
     if showAsia
         f_sessUpdate(sAsiaQ, cAsia, pAsia, "Asia", colAsia)
