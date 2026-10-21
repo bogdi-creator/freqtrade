@@ -18,6 +18,9 @@
 //   * Orders are placed / cancelled at chart-bar close only (barstate.isconfirmed).
 //   * All boxes / lines / labels use xloc.bar_time, so they survive timeframe changes.
 //
+//  NOTES: session day masks (':23456') are ignored (time of day only). The manual pivot rule is left
+//  strict / right non-strict (TradingView's tie rule for ta.pivothigh is undocumented). Silver Bullet window 1
+//  (03:00-04:00 NY) cannot produce an entry because Head 2 must happen in a NY killzone.
 //  NO REPAINTING: no future data; HTF values use [1] offsets; pivots are used N bars late.
 //  Order-flow items (M9-M11) are PROXIES built from TICK VOLUME, not real order flow.
 //  Full assumption list: see the chat reply that accompanied this file.
@@ -87,7 +90,7 @@ h2OnAm   = input.bool(true, "Head 2 / trades allowed in NY AM killzone", group=G
 h2OnPm   = input.bool(true, "Head 2 / trades allowed in NY PM killzone", group=G_SES)
 
 // --- structure ---
-swingMin = input.float(15.0, "Swing length (minutes each side)", minval=1.0, step=1.0, group=G_STR)
+swingMin = input.float(15.0, "Swing length (minutes each side)", minval=1.0, maxval=240.0, step=1.0, group=G_STR)
 
 // --- size thresholds ---
 useAtrSizes    = input.bool(true, "Scale sizes with ATR(14) of the logic timeframe (off = fixed $)", group=G_SIZE)
@@ -119,7 +122,7 @@ oteMidPct = input.float(70.5, "OTE midpoint (% retracement)", minval=0.0, maxval
 minWickPct  = input.float(70.0, "Head 1: min sweep wick as % of candle range", minval=0.0, maxval=100.0, group=G_MOD)
 h2UseWick   = input.bool(false, "Apply the wick % filter to Head 2 as well", group=G_MOD)
 maxH2AgeMin = input.float(240.0, "Max time from Head 2 to trigger (minutes)", minval=5.0, group=G_MOD)
-entryMode   = input.string(M_FVG, "Entry zone", options=[M_FVG, M_OTE, M_OB, M_BRK], group=G_MOD)
+entryMode   = input.string(M_FVG, "Entry zone", options=[M_FVG, M_OTE, M_OB, M_BRK], group=G_MOD, tooltip="Breaker block needs M7 enabled.")
 needConf    = input.bool(false, "Require confluence of 2 zones (FVG / OTE / OB / Breaker overlap)", group=G_MOD)
 expiryMin   = input.float(60.0, "Cancel limit if unfilled after (minutes)", minval=1.0, group=G_MOD)
 cancelAtKz  = input.bool(true, "Also cancel pending limit when the killzone ends", group=G_MOD)
@@ -158,8 +161,8 @@ lvlNw     = input.bool(true, "NWOG", group=G_M2, inline="l2")
 
 // --- M3 premium / discount ---
 usePD    = input.bool(false, "Enable premium / discount (draws the 50% line)", group=G_M3)
-pdFilter = input.bool(true, "Hard filter: longs only in discount, shorts only in premium", group=G_M3)
-drMin    = input.float(60.0, "Dealing-range swing length (minutes each side)", minval=5.0, group=G_M3)
+pdFilter = input.bool(true, "Hard filter: longs only in discount, shorts only in premium", group=G_M3, tooltip="While no valid dealing range exists yet the filter lets trades through.")
+drMin    = input.float(60.0, "Dealing-range swing length (minutes each side)", minval=5.0, maxval=1440.0, group=G_M3)
 
 // --- M4 equal highs / lows ---
 useEq   = input.bool(false, "Enable equal highs / lows pools (mark + use as targets)", group=G_M4)
@@ -170,19 +173,19 @@ eqKeepN = input.int(3, "Keep last N pools per side", minval=1, maxval=20, group=
 useSB    = input.bool(false, "Enable Silver Bullet windows (confluence)", group=G_M5)
 sbFilter = input.bool(false, "Only take entries inside the windows (also cancels a pending limit when the window ends)", group=G_M5)
 sbTz     = input.string("America/New_York", "Time zone", group=G_M5)
-sbWin1   = input.session("0300-0400", "Window 1", group=G_M5)
+sbWin1   = input.session("0300-0400", "Window 1 (no entry possible: Head 2 must be in a NY killzone)", group=G_M5)
 sbWin2   = input.session("1000-1100", "Window 2", group=G_M5)
 sbWin3   = input.session("1400-1500", "Window 3", group=G_M5)
 
 // --- M6 judas ---
-useJudas = input.bool(false, "Enable Judas swing check (London sweep opposite to the bias = confluence)", group=G_M6)
+useJudas = input.bool(false, "Enable Judas swing check (London sweep opposite to the bias = confluence)", group=G_M6, tooltip="In the Orochi model the trade direction equals the London sweep direction, so this flag is true only for trades AGAINST the HTF bias; it can never coincide with the M1 bias flag, and the M1 bias filter would block those trades.")
 
 // --- M7 breaker ---
 useBrk     = input.bool(false, "Enable breaker blocks (track, draw, allow as entry zone)", group=G_M7)
 maxBrkKeep = input.int(20, "Max breakers tracked", minval=3, maxval=100, group=G_M7)
 
 // --- M8 mitigation ---
-useMit = input.bool(false, "Enable mitigation grey-out for FVG / IFVG (price touched the 50%)", group=G_M8)
+useMit = input.bool(false, "Enable mitigation grey-out (FVG / IFVG: price touched the 50%; OB / breaker: price touched the zone)", group=G_M8)
 
 // --- M9-M11 proxies ---
 useDisp      = input.bool(false, "M9 Displacement strength PROXY (MSS candle body / ATR and tick-volume ratio)", group=G_M9)
@@ -315,6 +318,7 @@ var float dayHiSeen  = na
 var float dayLoSeen  = na
 var float wkHiSeen   = na
 var float wkLoSeen   = na
+var int   lastNdDow  = 0
 // heads
 var int   h1Dir      = 0
 var int   h1Bar      = na
@@ -378,6 +382,7 @@ var bool   armDeltaOk   = false
 var box    oteBox       = na
 var bool   pending      = false
 var int    pendBar      = na
+var int    pendT        = 0
 var int    pendDir      = 0
 var float  pendEntry    = na
 var float  pendSlRaw    = na
@@ -439,16 +444,16 @@ int  newsAfterMs  = newsAfter * 60000
 f_bars(float minutes) =>
     math.max(1, int(math.round(minutes * 60.0 / effSec)))
 
-int swingBars   = f_bars(swingMin)
+int swingBars   = math.min(1000, f_bars(swingMin))
 int fvgAgeBars  = f_bars(fvgMaxAgeMin)
 int fvgWaitBars = fvgWaitMin <= 0.0 ? 0 : f_bars(fvgWaitMin)
 int obDepthBars = f_bars(obDepthMin)
 int h2AgeBars   = f_bars(maxH2AgeMin)
 int expiryBars  = f_bars(expiryMin)
 int liqLookBars = f_bars(liqLookbackMin)
-int drBars      = f_bars(drMin)
+int drBars      = math.min(1000, f_bars(drMin))
 int legCapBars  = math.min(f_bars(2000.0), BAR_CAP - 60)
-int smtBarsChart = math.max(1, int(math.round(swingMin * 60.0 / chartSec)))
+int smtBarsChart = math.min(250, math.max(1, int(math.round(swingMin * 60.0 / chartSec))))
 
 // =============================================================================
 // HTF STRUCTURE (runs inside request.security): last MSS direction on that timeframe
@@ -489,7 +494,7 @@ f_htfMss(int len) =>
 // HIGHER-TIMEFRAME / EXTERNAL DATA (all non-repainting: [1] offsets, lookahead_on, or same-TF)
 // =============================================================================
 // previous COMPLETED logic-timeframe bar (used only when the chart is below the logic TF)
-[fO, fH, fL, fC, fV, fT] = request.security(syminfo.tickerid, logicTf, [open[1], high[1], low[1], close[1], volume[1], time[1]], lookahead=barmerge.lookahead_on)
+[lgO, lgH, lgL, lgC, lgV, lgT] = request.security(syminfo.tickerid, logicTf, [open[1], high[1], low[1], close[1], volume[1], time[1]], lookahead=barmerge.lookahead_on)
 
 // M1: last MSS direction on H4 and Daily, taken from the last CLOSED HTF bar
 int mssH4 = nz(request.security(syminfo.tickerid, "240", f_htfMss(htfSwing), lookahead=barmerge.lookahead_on))
@@ -974,7 +979,7 @@ f_eqUpdate(float px, bool hi) =>
         for i = 0 to np - 1
             Pool pp = array.get(pools, i)
             if not joined and math.abs(pp.lvl - px) <= eqTol
-                pp.cnt += 1
+                pp.cnt := pp.cnt + 1
                 pp.lvl := hi ? math.max(pp.lvl, px) : math.min(pp.lvl, px)
                 joined := true
                 f_poolSync(pp, hi)
@@ -1034,20 +1039,20 @@ f_record(array<int> tot, array<int> win, array<string> rows, string mask, bool i
 // CHART-CONTEXT DATA (runs on every chart bar)
 // =============================================================================
 // session boundaries in minutes of the day
-int asia0 = f_sStart(asiaSess)
-int asia1 = f_sEnd(asiaSess)
-int lon0  = f_sStart(lonSess)
-int lon1  = f_sEnd(lonSess)
-int nyam0 = f_sStart(nyamSess)
-int nyam1 = f_sEnd(nyamSess)
-int nypm0 = f_sStart(nypmSess)
-int nypm1 = f_sEnd(nypmSess)
-int sb10  = f_sStart(sbWin1)
-int sb11  = f_sEnd(sbWin1)
-int sb20  = f_sStart(sbWin2)
-int sb21  = f_sEnd(sbWin2)
-int sb30  = f_sStart(sbWin3)
-int sb31  = f_sEnd(sbWin3)
+var int asia0 = f_sStart(asiaSess)
+var int asia1 = f_sEnd(asiaSess)
+var int lon0  = f_sStart(lonSess)
+var int lon1  = f_sEnd(lonSess)
+var int nyam0 = f_sStart(nyamSess)
+var int nyam1 = f_sEnd(nyamSess)
+var int nypm0 = f_sStart(nypmSess)
+var int nypm1 = f_sEnd(nypmSess)
+var int sb10  = f_sStart(sbWin1)
+var int sb11  = f_sEnd(sbWin1)
+var int sb20  = f_sStart(sbWin2)
+var int sb21  = f_sEnd(sbWin2)
+var int sb30  = f_sStart(sbWin3)
+var int sb31  = f_sEnd(sbWin3)
 
 bool cAsia = f_inS(time, asia0, asia1, asiaTz)
 bool cLon  = f_inS(time, lon0, lon1, lonTz)
@@ -1080,6 +1085,8 @@ if not na(gPh)
         float sOldH = sgH[bar_index - smtLastPhBar]
         if not na(sNewH) and not na(sOldH) and sNewH <= sOldH
             smtBearT := time
+            if useSMT
+                label.new(time, high, "SMT▼", xloc=xloc.bar_time, style=label.style_label_down, color=color.new(color.red, 20), textcolor=color.white, size=size.tiny)
     smtLastPh := gPh
     smtLastPhBar := gPhBar
 if not na(gPl)
@@ -1089,6 +1096,8 @@ if not na(gPl)
         float sOldL = sgL[bar_index - smtLastPlBar]
         if not na(sNewL) and not na(sOldL) and sNewL >= sOldL
             smtBullT := time
+            if useSMT
+                label.new(time, low, "SMT▲", xloc=xloc.bar_time, style=label.style_label_up, color=color.new(color.green, 20), textcolor=color.white, size=size.tiny)
     smtLastPl := gPl
     smtLastPlBar := gPlBar
 bool smtBullActive = useSMT and smtBullT > 0 and (time - smtBullT) <= int(smtWinMin * 60000.0)
@@ -1102,7 +1111,7 @@ if newFillS
     tradesToday += 1
     if pending
         pending := false
-        alert("OROCHI " + syminfo.ticker + " order FILLED @ " + str.tostring(pendEntry, format.mintick), alert.freq_once_per_bar_close)
+        alert("OROCHI " + syminfo.ticker + " order FILLED @ " + str.tostring(pendEntry, format.mintick), alert.freq_all)
 
 int closedNow = strategy.closedtrades
 if not signalOnly and closedNow > lastClosed
@@ -1112,17 +1121,32 @@ if not signalOnly and closedNow > lastClosed
     lastClosed := closedNow
 
 // The logic bar to process on this chart bar
-float xO = fetchLogic ? fO : open
-float xH = fetchLogic ? fH : high
-float xL = fetchLogic ? fL : low
-float xC = fetchLogic ? fC : close
-float xV = fetchLogic ? fV : volume
-int   xT = fetchLogic ? fT : time
-bool newLogic = barstate.isconfirmed and (fetchLogic ? (not na(fT) and fT > lastFedT) : true)
+float xO = fetchLogic ? lgO : open
+float xH = fetchLogic ? lgH : high
+float xL = fetchLogic ? lgL : low
+float xC = fetchLogic ? lgC : close
+float xV = fetchLogic ? lgV : volume
+int   xT = fetchLogic ? lgT : time
+bool newLogic = barstate.isconfirmed and (fetchLogic ? (not na(lgT) and lgT > lastFedT) : true)
 
 // =============================================================================
 // LOGIC STEP: runs once per completed logic bar
 // =============================================================================
+// Values produced in one part of the logic step and consumed in another. The step is split into several
+// `if newLogic` blocks (A: bar + sessions + range, B: structure + zones, C: heads, D: orders + trigger) so no
+// single block becomes enormous; these per-bar scratch values are declared once here.
+float relVol     = na
+float minFvgNow  = na
+float stopBufNow = na
+float minStopNow = na
+bool  lLon       = false
+bool  lNyKz      = false
+bool  sbNow      = false
+bool  sbNext     = false
+bool  newDay     = false
+bool  mssBull    = false
+bool  mssBear    = false
+
 if newLogic
     // ------------------------------------------------------------- 0. register the logic bar
     lb += 1
@@ -1157,19 +1181,21 @@ if newLogic
         atrV := (atrV * 13.0 + trNow) / 14.0
     prevC := cC
     float volAvg = f_volAvg(20)
-    float relVol = na(volAvg) or volAvg <= 0.0 ? na : cV / volAvg
-    float minFvgNow  = useAtrSizes and not na(atrV) ? fvgAtrMult * atrV : minFvgUsd
-    float stopBufNow = useAtrSizes and not na(atrV) ? bufAtrMult * atrV : stopBufUsd
-    float minStopNow = useAtrSizes and not na(atrV) ? minStopAtrMult * atrV : minStopUsd
+    relVol := na(volAvg) or volAvg <= 0.0 ? na : cV / volAvg
+    minFvgNow  := useAtrSizes and not na(atrV) ? fvgAtrMult * atrV : minFvgUsd
+    stopBufNow := useAtrSizes and not na(atrV) ? bufAtrMult * atrV : stopBufUsd
+    minStopNow := useAtrSizes and not na(atrV) ? minStopAtrMult * atrV : minStopUsd
 
     // ------------------------------------------------------------- 1. sessions (time of day in each session's own TZ)
     bool lAsia = f_inS(lt, asia0, asia1, asiaTz)
-    bool lLon  = f_inS(lt, lon0, lon1, lonTz)
+    lLon := f_inS(lt, lon0, lon1, lonTz)
     bool lNyAm = f_inS(lt, nyam0, nyam1, nyamTz)
     bool lNyPm = f_inS(lt, nypm0, nypm1, nypmTz)
-    bool lNyKz = (lNyAm and h2OnAm) or (lNyPm and h2OnPm)
-    bool sbNow = f_inS(lt, sb10, sb11, sbTz) or f_inS(lt, sb20, sb21, sbTz) or f_inS(lt, sb30, sb31, sbTz)
-    bool newDay  = lAsia and not prevAsia
+    lNyKz := (lNyAm and h2OnAm) or (lNyPm and h2OnPm)
+    sbNow := f_inS(lt, sb10, sb11, sbTz) or f_inS(lt, sb20, sb21, sbTz) or f_inS(lt, sb30, sb31, sbTz)
+    // the window the order will be LIVE in (starts at the close of this step)
+    sbNext := f_inS(time_close, sb10, sb11, sbTz) or f_inS(time_close, sb20, sb21, sbTz) or f_inS(time_close, sb30, sb31, sbTz)
+    newDay := lAsia and not prevAsia
     bool asiaEnd = not lAsia and prevAsia
     prevAsia := lAsia
     // the NEXT bar overlaps a news window -> no new setups, pending orders are cancelled
@@ -1206,9 +1232,11 @@ if newLogic
         armed := false
         dayHiSeen := cH
         dayLoSeen := cL
-        if dayofweek(lt, asiaTz) == dayofweek.monday
+        int ndDow = dayofweek(lt, asiaTz)
+        if ndDow <= lastNdDow
             wkHiSeen := cH
             wkLoSeen := cL
+        lastNdDow := ndDow
         if showAsia
             asiaBox := box.new(lt, cH, lt + effMs, cL, xloc=xloc.bar_time, border_color=color.new(colAsia, asiaLineTr),
                  border_width=1, border_style=line.style_dashed, bgcolor=color.new(colAsia, asiaFillTr), text="Asian range",
@@ -1228,7 +1256,7 @@ if newLogic
     wkLoSeen  := na(wkLoSeen) ? cL : math.min(wkLoSeen, cL)
 
     if asiaEnd
-        rangeReady := true
+        rangeReady := daysSeen > 1
         if not na(asiaBox)
             box.set_extend(asiaBox, extend.right)
 
@@ -1239,6 +1267,7 @@ if newLogic
         if cC < arl
             arlMit := true
 
+if newLogic
     // ------------------------------------------------------------- 3. structure: swings, liquidity, dealing range, MSS
     float swPh = f_pivHigh(swingBars)
     float swPl = f_pivLow(swingBars)
@@ -1295,8 +1324,8 @@ if newLogic
     bool bearBrk = not na(lastSL) and not slBroken and cC < lastSL
     if bullBrk and bearBrk
         bearBrk := false
-    bool mssBull = bullBrk and trend == -1      // break UP after a down move
-    bool mssBear = bearBrk and trend == 1       // break DOWN after an up move
+    mssBull := bullBrk and trend == -1      // break UP after a down move
+    mssBear := bearBrk and trend == 1       // break DOWN after an up move
     int brkSwingBar = mssBull ? lastSHbar : mssBear ? lastSLbar : na
     if bullBrk
         shBroken := true
@@ -1323,6 +1352,11 @@ if newLogic
                         Zone oldB = array.shift(brks)
                         f_dropZone(oldB, brkQ)
                 array.remove(obs, i)
+            else if useMit and not zo.mit
+                bool zoTouch = zo.dir == 1 ? cL <= zo.top : cH >= zo.bot
+                if zoTouch
+                    zo.mit := true
+                    f_greyZone(zo, "OB mit")
 
     // --- Breakers: retest from the other side, and mitigation (close back through the far side) ---
     if array.size(brks) > 0
@@ -1338,7 +1372,9 @@ if newLogic
                 bool bTouch = zb.dir == 1 ? cL <= zb.top : cH >= zb.bot
                 if bTouch
                     zb.retested := true
-                    if not na(zb.bx)
+                    if useMit
+                        f_greyZone(zb, zb.dir == 1 ? "BRK▲ mit" : "BRK▼ mit")
+                    else if not na(zb.bx)
                         box.set_text(zb.bx, zb.dir == 1 ? "BRK▲ retest" : "BRK▼ retest")
 
     // --- On every MSS: displacement leg origin + order block + proxies ---
@@ -1413,14 +1449,15 @@ if newLogic
         float newTop = newBull ? cL : c1L
         float newBot = newBull ? c1H : cH
         zoneSeq += 1
-        Zone nz = f_mkZone(newTop, newBot, lb - 1, newBull ? 1 : -1, f_tm(2), zoneSeq)
-        array.push(fvgs, nz)
+        Zone newFvgZ = f_mkZone(newTop, newBot, lb - 1, newBull ? 1 : -1, f_tm(2), zoneSeq)
+        array.push(fvgs, newFvgZ)
         if showFvg
-            f_drawZone(nz, fvgQ, fvgKeepN, newBull ? colFvgBull : colFvgBear, newBull ? "FVG▲" : "FVG▼")
+            f_drawZone(newFvgZ, fvgQ, fvgKeepN, newBull ? colFvgBull : colFvgBear, newBull ? "FVG▲" : "FVG▼")
         if array.size(fvgs) > maxFvgKeep
             Zone oldF = array.shift(fvgs)
             f_dropZone(oldF, oldF.isIfvg ? ifvgQ : fvgQ)
 
+if newLogic
     // ------------------------------------------------------------- 4. the two heads
     float rngC  = cH - cL
     float upPct = rngC > 0.0 ? (cH - math.max(cO, cC)) / rngC * 100.0 : 0.0
@@ -1428,7 +1465,7 @@ if newLogic
     // wick through the level, close back inside the range
     bool swHi = rangeReady and cH > arh and cC <= arh and cC >= arl
     bool swLo = rangeReady and cL < arl and cC >= arl and cC <= arh
-    string rvTxt = useSweepVol and not na(relVol) ? " RV " + str.tostring(relVol, "#.#") + "x" : ""
+    string rvTxt = useSweepVol and not na(relVol) ? " tickRV " + str.tostring(relVol, "#.#") + "x" : ""
 
     // Head 1: first valid sweep in the London killzone (wick >= minWickPct of the candle range).
     if rangeReady and lLon and h1Dir == 0
@@ -1439,13 +1476,13 @@ if newLogic
             h1Bar := lb
             h1RV := relVol
             label.new(lt, cH, "H1" + rvTxt, xloc=xloc.bar_time, style=label.style_label_down, color=color.new(color.orange, 15), textcolor=color.white, size=size.small)
-            alert("OROCHI " + syminfo.ticker + " Head 1: ARH swept in London (bearish trap) - waiting for ARL sweep in NY", alert.freq_once_per_bar_close)
+            alert("OROCHI " + syminfo.ticker + " Head 1: ARH swept in London (bearish trap) - waiting for ARL sweep in NY", alert.freq_all)
         else if okLo and not okHi
             h1Dir := -1
             h1Bar := lb
             h1RV := relVol
             label.new(lt, cL, "H1" + rvTxt, xloc=xloc.bar_time, style=label.style_label_up, color=color.new(color.orange, 15), textcolor=color.white, size=size.small)
-            alert("OROCHI " + syminfo.ticker + " Head 1: ARL swept in London (bullish trap) - waiting for ARH sweep in NY", alert.freq_once_per_bar_close)
+            alert("OROCHI " + syminfo.ticker + " Head 1: ARL swept in London (bullish trap) - waiting for ARH sweep in NY", alert.freq_all)
 
     // Head 2: OPPOSITE side swept inside a NY killzone, closing back inside.
     if rangeReady and h1Dir != 0 and not h2Active and lNyKz and lb > h1Bar
@@ -1462,13 +1499,14 @@ if newLogic
                 label.new(lt, cL, "H2" + rvTxt, xloc=xloc.bar_time, style=label.style_label_up, color=color.new(color.fuchsia, 15), textcolor=color.white, size=size.small)
             else
                 label.new(lt, cH, "H2" + rvTxt, xloc=xloc.bar_time, style=label.style_label_down, color=color.new(color.fuchsia, 15), textcolor=color.white, size=size.small)
-            alert("OROCHI " + syminfo.ticker + " Head 2: " + (h2Dir == 1 ? "ARL" : "ARH") + " swept - looking for " + (h2Dir == 1 ? "bullish" : "bearish") + " MSS + FVG", alert.freq_once_per_bar_close)
+            alert("OROCHI " + syminfo.ticker + " Head 2: " + (h2Dir == 1 ? "ARL" : "ARH") + " swept - looking for " + (h2Dir == 1 ? "bullish" : "bearish") + " MSS + FVG", alert.freq_all)
 
     if h2Active
         h2Ext := h2Dir == 1 ? math.min(h2Ext, cL) : math.max(h2Ext, cH)
         if lb - h2Bar > h2AgeBars
             h2Active := false
 
+if newLogic
     // ------------------------------------------------------------- 5. order management: virtual fills (signal-only), cancellations
     bool virtFill = false
     if signalOnly and virtDir != 0
@@ -1478,8 +1516,8 @@ if newLogic
             f_record(modTot, modWin, tradeRows, pendMask, not vSL, 0.0, pendDir, pendScore)
             virtDir := 0
             skipMsg := vSL ? "signal closed: stop touched" : "signal closed: target touched"
-            alert("OROCHI " + syminfo.ticker + " signal " + (vSL ? "STOP" : "TARGET") + " touched @ " + str.tostring(vSL ? pendSL : pendTP, format.mintick), alert.freq_once_per_bar_close)
-    else if signalOnly and pending and lb > pendBar
+            alert("OROCHI " + syminfo.ticker + " signal " + (vSL ? "STOP" : "TARGET") + " touched @ " + str.tostring(vSL ? pendSL : pendTP, format.mintick), alert.freq_all)
+    else if signalOnly and pending and lb > pendBar and lt >= pendT
         bool vTouched = pendDir == 1 ? cL <= pendEntry : cH >= pendEntry
         if vTouched
             virtDir := pendDir
@@ -1487,7 +1525,7 @@ if newLogic
     if virtFill
         tradesToday += 1
         pending := false
-        alert("OROCHI " + syminfo.ticker + " limit TOUCHED (virtual fill, signal only) @ " + str.tostring(pendEntry, format.mintick), alert.freq_once_per_bar_close)
+        alert("OROCHI " + syminfo.ticker + " limit TOUCHED (virtual fill, signal only) @ " + str.tostring(pendEntry, format.mintick), alert.freq_all)
 
     int posB = signalOnly ? virtDir : int(math.sign(strategy.position_size))
 
@@ -1495,7 +1533,7 @@ if newLogic
         string cx = ""
         if newDay
             cx := "new trading day"
-        else if lb - pendBar >= expiryBars
+        else if time_close - pendT >= int(expiryMin * 60000.0)
             cx := "unfilled after " + str.tostring(expiryMin, "#") + " min"
         else if (pendDir == 1 ? cC < pendFvgBot : cC > pendFvgTop)
             cx := "IFVG formed against the trade (FVG closed through)"
@@ -1503,7 +1541,7 @@ if newLogic
             cx := "news window"
         else if cancelAtKz and not lNyKz
             cx := "killzone ended"
-        else if useSB and sbFilter and not sbNow
+        else if useSB and sbFilter and not sbNext
             cx := "Silver Bullet window ended"
         else if (pendDir == 1 ? cL <= pendSlRaw : cH >= pendSlRaw)
             cx := "structure/stop level traded before fill"
@@ -1513,7 +1551,7 @@ if newLogic
                 strategy.cancel(pendXid)
             pending := false
             skipMsg := "cancelled: " + cx
-            alert("OROCHI " + syminfo.ticker + " limit CANCELLED: " + cx, alert.freq_once_per_bar_close)
+            alert("OROCHI " + syminfo.ticker + " limit CANCELLED: " + cx, alert.freq_all)
 
     // ------------------------------------------------------------- 6. trigger (MSS + FVG) -> arm -> build the limit order
     bool canTrade = posB == 0 and not pending and tradesToday < maxTrades and not newsBlk
@@ -1532,11 +1570,15 @@ if newLogic
         skipMsg := "armed (waiting for FVG)"
         float ext0 = f_legExt(armDir == 1, lb - armOriginBar)
         [oT0, oB0, oM0] = f_ote(armDir, ext0, armOriginPx)
+        if not na(oteBox)
+            box.set_extend(oteBox, extend.none)
+            box.set_right(oteBox, lt)
+            oteBox := na
         if showOte
             oteBox := f_zoneBox(lt, oT0, oB0, colOte, "OTE")
             array.push(oteQ, oteBox)
             f_trimBoxQ(oteQ, oteKeepN)
-        alert("OROCHI " + syminfo.ticker + " TRIGGER: " + (armDir == 1 ? "bullish" : "bearish") + " MSS after Head 2", alert.freq_once_per_bar_close)
+        alert("OROCHI " + syminfo.ticker + " TRIGGER: " + (armDir == 1 ? "bullish" : "bearish") + " MSS after Head 2", alert.freq_all)
 
     if armed
         bool broke = armDir == 1 ? cL < armOriginPx : cH > armOriginPx
@@ -1559,8 +1601,10 @@ if newLogic
                 float fTop = fz.top
                 float fBot = fz.bot
                 // the trigger FVG must be visible even if the "last N" queue trimmed it
-                if showFvg
+                if showFvg and fz.midBar >= dayStartLb and na(fz.bx)
                     f_drawZone(fz, fvgQ, fvgKeepN, d == 1 ? colFvgBull : colFvgBear, d == 1 ? "FVG▲" : "FVG▼")
+                    if fz.mit
+                        f_greyZone(fz, "FVG mit")
 
                 // --- zones ---
                 float legExt = f_legExt(d == 1, lb - armOriginBar)
@@ -1579,7 +1623,7 @@ if newLogic
                 if nbk > 0
                     for i = nbk - 1 to 0
                         Zone zk = array.get(brks, i)
-                        if not brkOk and zk.alive and zk.dir == d
+                        if not brkOk and zk.alive and zk.dir == d and zk.midBar >= armOriginBar
                             brkOk := true
                             brkTopV := zk.top
                             brkBotV := zk.bot
@@ -1638,8 +1682,8 @@ if newLogic
 
                 if na(entry)
                     ok := false
-                    why := needConf ? "no 2-zone confluence" : "no entry zone available"
-                if ok and not (d * (cC - entry) > syminfo.mintick)
+                    why := needConf ? "no 2-zone confluence" : (entryMode == M_BRK and not useBrk ? "Breaker entry needs M7 enabled" : "no entry zone available")
+                if ok and not (d * (cC - entry) > syminfo.mintick and d * (close - entry) > syminfo.mintick)
                     ok := false
                     why := "entry level not on the passive side of price"
 
@@ -1654,6 +1698,9 @@ if newLogic
                     if not (d * (entry - slB) >= math.max(minStopNow, syminfo.mintick))
                         ok := false
                         why := "stop distance below minimum"
+                if ok and not (d * (close - slB) > 0)
+                    ok := false
+                    why := "price is already through the stop level"
 
                 // --- target + RR (costs: TP moved by spread, SL by spread + slippage) ---
                 float slE = na
@@ -1708,15 +1755,15 @@ if newLogic
                     if ok and usePD and pdFilter and drValid and not fP
                         ok := false
                         why := d == 1 ? "long is not in discount" : "short is not in premium"
-                    if ok and useSB and sbFilter and not sbNow
+                    if ok and useSB and sbFilter and not sbNext
                         ok := false
                         why := "outside the Silver Bullet windows"
                     if ok and useDisp and dispFilter and not armDispOk
                         ok := false
-                        why := "displacement proxy too weak (body/ATR or tick volume)"
+                        why := "displacement proxy too weak (body/ATR or tick volume; a feed without volume always fails)"
                     if ok and useDelta and deltaFilter and not armDeltaOk
                         ok := false
-                        why := "delta proxy disagrees with the trade direction"
+                        why := "delta proxy disagrees with the trade direction (a feed without volume always fails)"
                     score := (fB ? 1 : 0) + (fL ? 1 : 0) + (fP ? 1 : 0) + (fE ? 1 : 0) + (fS ? 1 : 0) + (fJ ? 1 : 0) + (fK ? 1 : 0) + (fD ? 1 : 0) + (fT ? 1 : 0) + (fM ? 1 : 0)
                     mask := (fB ? "1" : "0") + (fL ? "1" : "0") + (fP ? "1" : "0") + (fE ? "1" : "0") + (fS ? "1" : "0") + (fJ ? "1" : "0") + (fK ? "1" : "0") + (fD ? "1" : "0") + (fT ? "1" : "0") + (fM ? "1" : "0")
                     if ok and score < minScore
@@ -1737,10 +1784,11 @@ if newLogic
                     string xid = d == 1 ? "Orochi L exit" : "Orochi S exit"
                     string letters = f_maskLetters(mask)
                     if not signalOnly
-                        strategy.entry(eid, d == 1 ? strategy.long : strategy.short, qty=qty, limit=entry, comment="Orochi " + (d == 1 ? "L" : "S") + " sc" + str.tostring(score) + " " + mask)
+                        strategy.entry(eid, d == 1 ? strategy.long : strategy.short, qty=qty, limit=entry, comment="Orochi " + (d == 1 ? "L" : "S") + " sc" + str.tostring(score) + " " + mask + " " + letters)
                         strategy.exit(xid, from_entry=eid, stop=math.round_to_mintick(slE), limit=math.round_to_mintick(tpE), comment="Orochi exit")
                     pending := true
                     pendBar := lb
+                    pendT := time_close
                     pendDir := d
                     pendEntry := entry
                     pendSlRaw := slB
@@ -1760,6 +1808,13 @@ if newLogic
                         box.set_bottom(oteBox, oteBotP)
                     // --- visuals: setup label + entry / stop / target lines, each with its price ---
                     if showSetup
+                        if lineLive
+                            line.delete(lnEntry)
+                            line.delete(lnStop)
+                            line.delete(lnTgt)
+                            label.delete(lbEntry)
+                            label.delete(lbStop)
+                            label.delete(lbTgt)
                         lnEntry := f_hline(entry, color.blue)
                         lnStop := f_hline(slE, color.red)
                         lnTgt := f_hline(tpE, color.green)
@@ -1775,11 +1830,11 @@ if newLogic
                     alert("OROCHI " + syminfo.ticker + " " + (d == 1 ? "LONG" : "SHORT") + " SETUP | Entry " + str.tostring(entry, format.mintick) +
                          " | Stop " + str.tostring(slE, format.mintick) + " | Target " + str.tostring(tpE, format.mintick) +
                          " | Units " + str.tostring(qty, "#.##") + " (" + str.tostring(riskPct, "#.##") + "% risk) | RR " + str.tostring(rr, "#.##") +
-                         " | Score " + str.tostring(score) + "/10 [" + letters + "]" + (signalOnly ? " | SIGNAL ONLY" : ""), alert.freq_once_per_bar_close)
+                         " | Score " + str.tostring(score) + "/10 [" + letters + "]" + (signalOnly ? " | SIGNAL ONLY" : ""), alert.freq_all)
                 else
                     armed := false
                     skipMsg := "skipped: " + why
-                    alert("OROCHI " + syminfo.ticker + " setup SKIPPED: " + why, alert.freq_once_per_bar_close)
+                    alert("OROCHI " + syminfo.ticker + " setup SKIPPED: " + why, alert.freq_all)
 
     // Finish the OTE box when nothing is armed or pending any more.
     if not na(oteBox) and not armed and not pending
@@ -1834,7 +1889,7 @@ plot(rangeReady ? arh : na, "ARH", color=color.new(colAsia, 55), style=plot.styl
 plot(rangeReady ? arl : na, "ARL", color=color.new(colAsia, 55), style=plot.style_linebr)
 
 // --- status table: current session, model state, bias, timeframes, history ---
-var table tbl = table.new(position.top_right, 2, 18, border_width=1)
+var table tbl = table.new(position.top_right, 2, 19, border_width=1)
 f_cell(int r, string k, string v, color bg) =>
     table.cell(tbl, 0, r, k, text_color=color.white, text_size=size.small, bgcolor=color.new(color.gray, 30))
     table.cell(tbl, 1, r, v, text_color=color.white, text_size=size.small, bgcolor=bg)
@@ -1851,6 +1906,8 @@ if barstate.islast and showTable
         warnTxt += "Chart above 1h: session logic approximate. "
     if chartSec > logicSecIn
         warnTxt += "Chart above logic TF: detection runs on the chart TF. "
+    if logicSecIn > chartSec and logicSecIn % chartSec != 0
+        warnTxt += "Chart TF does not divide the logic TF: timing can differ by one chart bar between history and realtime. "
     if maxPossible < 100
         warnTxt += "History too short: at most " + str.tostring(maxPossible) + " trades possible (<100). "
     f_cell(0, "Current session", cur, color.new(curCol, 20))
@@ -1860,8 +1917,8 @@ if barstate.islast and showTable
     f_cell(4, "NY PM KZ", cNyPm ? "ACTIVE" : "-", cNyPm ? color.new(colNyPm, 20) : color.new(color.gray, 60))
     string rngTxt = na(arh) ? "-" : str.tostring(arh, format.mintick) + " / " + str.tostring(arl, format.mintick) + (rangeReady ? "" : " (building)")
     f_cell(5, "ARH / ARL", rngTxt, color.new(color.gray, 40))
-    string h1Txt = (h1Dir == 1 ? "ARH swept" : h1Dir == -1 ? "ARL swept" : "waiting") + (useSweepVol and not na(h1RV) ? " RV " + str.tostring(h1RV, "#.#") + "x" : "")
-    string h2Txt = (h2Active ? (h2Dir == 1 ? "ARL swept - LONG bias" : "ARH swept - SHORT bias") : "waiting") + (useSweepVol and h2Active and not na(h2RV) ? " RV " + str.tostring(h2RV, "#.#") + "x" : "")
+    string h1Txt = (h1Dir == 1 ? "ARH swept" : h1Dir == -1 ? "ARL swept" : "waiting") + (useSweepVol and not na(h1RV) ? " tickRV " + str.tostring(h1RV, "#.#") + "x" : "")
+    string h2Txt = (h2Active ? (h2Dir == 1 ? "ARL swept - LONG bias" : "ARH swept - SHORT bias") : "waiting") + (useSweepVol and h2Active and not na(h2RV) ? " tickRV " + str.tostring(h2RV, "#.#") + "x" : "")
     f_cell(6, "Head 1", h1Txt, h1Dir != 0 ? color.new(color.orange, 20) : color.new(color.gray, 60))
     f_cell(7, "Head 2", h2Txt, h2Active ? color.new(color.fuchsia, 20) : color.new(color.gray, 60))
     string stTxt = posNow != 0 ? "IN TRADE" : pending ? "LIMIT PENDING" : armed ? "ARMED" : "-"
@@ -1875,6 +1932,8 @@ if barstate.islast and showTable
     f_cell(15, "Timeframes", "chart " + timeframe.period + " | logic " + logicTf + " | effective " + effTfStr, chartSec > logicSecIn ? color.new(color.orange, 30) : color.new(color.gray, 60))
     f_cell(16, "History", "bars " + str.tostring(bar_index + 1) + " | days " + str.tostring(daysSeen) + " | max trades " + str.tostring(maxPossible), maxPossible < 100 ? color.new(color.orange, 30) : color.new(color.gray, 60))
     f_cell(17, "Warnings", warnTxt == "" ? "none" : warnTxt, warnTxt == "" ? color.new(color.gray, 60) : color.new(color.red, 30))
+    string smtTxt = not useSMT ? "off" : (na(sgH) ? "silver feed missing - check the symbol" : (smtBearActive ? "BEARISH SMT active" : smtBullActive ? "BULLISH SMT active" : "none"))
+    f_cell(18, "SMT (silver)", smtTxt, smtBearActive ? color.new(color.red, 30) : smtBullActive ? color.new(color.green, 30) : color.new(color.gray, 60))
 
 // --- module report: win rate by module + last completed trades (exportable via the entry comment) ---
 var table rptTbl = table.new(position.bottom_right, 4, 12, border_width=1)
@@ -1884,7 +1943,7 @@ if barstate.islast and showReport
     table.cell(rptTbl, 1, 0, "Trades", text_color=color.white, text_size=size.small, bgcolor=color.new(color.gray, 30))
     table.cell(rptTbl, 2, 0, "Wins", text_color=color.white, text_size=size.small, bgcolor=color.new(color.gray, 30))
     table.cell(rptTbl, 3, 0, "Win %", text_color=color.white, text_size=size.small, bgcolor=color.new(color.gray, 30))
-    string modNames = "B Bias|L Levels|P Prem/Disc|E Equal H/L|S Silver Bullet|J Judas|K Breaker|D Displacement*|T Delta*|M SMT|ALL trades"
+    string modNames = "B Bias|L Levels|P Prem/Disc|E Equal H/L|S Silver Bullet|J Judas|K Breaker|D Displacement (proxy)|T Delta (proxy)|M SMT|ALL trades"
     array<string> mn = str.split(modNames, "|")
     for ri = 0 to 10
         int tt = array.get(modTot, ri)
